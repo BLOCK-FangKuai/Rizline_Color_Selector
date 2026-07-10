@@ -53,7 +53,7 @@ Rizline_Color_Selector/
 ├── fonts/                      # 字体文件夹
 │ └── SourceHanSansCN/          # 思源黑体（简体中文）字体文件
 ├── output/                     # 输出文件存放目录（运行后自动生成）
-└── README.md
+├── README.md
 └── LICENSE.txt
 ```
 
