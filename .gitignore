@@ -21,9 +21,6 @@ venv/
 
 # Output
 output/
-*.png
-*.jpg
-*.jpeg
 
 # OS
 Thumbs.db
