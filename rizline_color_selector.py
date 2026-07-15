@@ -9,6 +9,7 @@ Rizline Color Selector
 
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
+import tkinter.font as tkfont
 import numpy as np
 from PIL import Image, ImageTk
 import colorsys
@@ -244,16 +245,19 @@ def enforce_color_constraints(regular, riztime, dominant_color):
             uv2 = min(0.92, uv2 * 1.25)
             ui = list(hsv_to_rgb(uh2, min(us2 * 1.15, 1.0), uv2))
 
-        # 修正线颜色
+        # 修正线颜色（适配行格式: list[list[(r,g,b)]]）
         bg_vl = rgb_to_hsv(*bg)[2]
         fixed_lines = []
-        for lc in part['line_colors']:
-            lr, lg, lb = lc
-            lh, ls, lv = rgb_to_hsv(lr, lg, lb)
-            lv = max(lv, bg_vl + 0.10)
-            if lv > 0.92:
-                lv = 0.88
-            fixed_lines.append(hsv_to_rgb(lh, min(ls, 1.0), lv))
+        for row in part['line_colors']:
+            fixed_row = []
+            for lc in row:
+                lr, lg, lb = lc
+                lh, ls, lv = rgb_to_hsv(lr, lg, lb)
+                lv = max(lv, bg_vl + 0.10)
+                if lv > 0.92:
+                    lv = 0.88
+                fixed_row.append(hsv_to_rgb(lh, min(ls, 1.0), lv))
+            fixed_lines.append(fixed_row)
         part['line_colors'] = fixed_lines
 
         part['note'] = tuple(note)
@@ -279,8 +283,10 @@ def extract_dominant_colors(image_path, n_colors=5, sample_size=10000, n_accent=
     img = img.resize((200, int(200 * img.height / img.width)), Image.LANCZOS)
     pixels = np.array(img).reshape(-1, 3)
 
+    rng = np.random.RandomState(42)  # 固定种子，确保相同图片结果一致
+
     if len(pixels) > sample_size:
-        idx = np.random.choice(len(pixels), sample_size, replace=False)
+        idx = rng.choice(len(pixels), sample_size, replace=False)
         pixels = pixels[idx]
 
     n_total = max(n_colors + n_accent + 6, 16)
@@ -330,7 +336,7 @@ def extract_dominant_colors(image_path, n_colors=5, sample_size=10000, n_accent=
             k2.fit(colorful_pixels)
             accent_from_pixels = [tuple(c.astype(int)) for c in k2.cluster_centers_]
         else:
-            idx2 = np.random.choice(len(colorful_pixels), min(n_accent + 2, len(colorful_pixels)), replace=False)
+            idx2 = rng.choice(len(colorful_pixels), min(n_accent + 2, len(colorful_pixels)), replace=False)
             accent_from_pixels = [tuple(colorful_pixels[i]) for i in idx2]
 
     all_accent_candidates = list(set(rest + accent_from_pixels))
@@ -367,7 +373,7 @@ def extract_dominant_colors(image_path, n_colors=5, sample_size=10000, n_accent=
 
 def simple_quantize(pixels, n_colors):
     """不使用 sklearn 的简易颜色量化"""
-    # 将颜色空间划分为网格，取每个网格的平均值
+    rng = np.random.RandomState(42)  # 固定种子
     bins = int(np.ceil(n_colors ** (1/3)))
     h, w, _ = (8, 8, 8)  # 将 256^3 划分为 8^3 = 512 个格子
     quantized = (pixels // 32).astype(int)
@@ -375,11 +381,11 @@ def simple_quantize(pixels, n_colors):
 
     if len(unique_bins) >= n_colors:
         # 采样 n_colors 个格子
-        sampled = unique_bins[np.random.choice(len(unique_bins), n_colors, replace=False)]
+        sampled = unique_bins[rng.choice(len(unique_bins), n_colors, replace=False)]
         return sampled * 32 + 16
     else:
         # 从原始像素中随机采样
-        idx = np.random.choice(len(pixels), n_colors, replace=False)
+        idx = rng.choice(len(pixels), n_colors, replace=False)
         return pixels[idx]
 
 
@@ -415,11 +421,11 @@ def create_color_sorted_preview(image_path, target_height=300):
     sorted_pixels = pixels[order].astype(np.uint8)
 
     target_n = out_h * out_w
-    if target_n > n:
-        pad = np.tile(sorted_pixels[-1:], (target_n - n, 1))
-        sorted_pixels = np.vstack([sorted_pixels, pad])
-    elif target_n < n:
-        sorted_pixels = sorted_pixels[:target_n]
+    if target_n != n:
+        # 均匀采样：在排序后的全量像素中均匀取点
+        # 避免截断导致丢失末尾（高亮低饱和）颜色
+        indices = np.linspace(0, n - 1, target_n).astype(int)
+        sorted_pixels = sorted_pixels[indices]
 
     return sorted_pixels.reshape(out_h, out_w, 3)
 
@@ -429,7 +435,7 @@ def create_color_sorted_preview(image_path, target_height=300):
 # ══════════════════════════════════════════════════════════════════
 
 def generate_color_scheme(dominant_color, accent_colors=None, minor_colors=None,
-                          full_pool=None, num_line_colors=5):
+                          full_pool=None, num_line_rows=5, num_line_cols=5):
     """
     从主色调 + 全部提取色生成 Rizline 配色方案
     full_pool: 所有提取到颜色的合并池（若提供则优先使用）
@@ -447,16 +453,16 @@ def generate_color_scheme(dominant_color, accent_colors=None, minor_colors=None,
     reg_bg, reg_note, reg_ui = _assign_roles(all_candidates, h, theme='regular')
     riz_bg, riz_note, riz_ui = _assign_roles(all_candidates, h, theme='riztime')
 
-    line_colors = _generate_line_colors(h, s, v, num_line_colors, mode='regular')
-    rt_line_colors = _generate_line_colors(h, s, v, num_line_colors, mode='riztime')
+    line_color_rows = build_line_color_rows_from_pool(all_candidates, n_rows=num_line_rows, n_cols=num_line_cols)
+    rt_line_color_rows = build_line_color_rows_from_pool(all_candidates, n_rows=num_line_rows, n_cols=num_line_cols)
 
     regular = {
         'note': reg_note, 'background': reg_bg, 'ui_effect': reg_ui,
-        'line_colors': line_colors, 'label': '常规段落'
+        'line_colors': line_color_rows, 'label': '常规段落'
     }
     riztime = {
         'note': riz_note, 'background': riz_bg, 'ui_effect': riz_ui,
-        'line_colors': rt_line_colors, 'label': 'Riztime段落'
+        'line_colors': rt_line_color_rows, 'label': 'Riztime段落'
     }
 
     regular, riztime = enforce_color_constraints(regular, riztime, dominant_color)
@@ -465,7 +471,10 @@ def generate_color_scheme(dominant_color, accent_colors=None, minor_colors=None,
     for part in [regular, riztime]:
         for key in ('note', 'background', 'ui_effect'):
             part[key] = tuple(int(v) for v in part[key])
-        part['line_colors'] = [tuple(int(v) for v in lc) for lc in part['line_colors']]
+        part['line_colors'] = [
+            [tuple(int(v) for v in lc) for lc in row]
+            for row in part['line_colors']
+        ]
 
     return regular, riztime
 
@@ -669,18 +678,216 @@ def build_line_color_groups_from_pool(full_pool, n_line=5, similarity_threshold=
     return groups
 
 
+def build_line_color_rows_from_pool(full_pool, n_rows=5, n_cols=5):
+    """
+    从颜色池中按色相分组，生成行×列的线颜色矩阵。
+
+    布局规则：
+      - 每行 = 色相相近的一组颜色，按亮度从左到右渐变排列
+      - 不同行 = 不同色系，纵向第一列颜色各不相同
+      - 优先使用池中原始颜色，不足时在色系内插值补全
+
+    返回: list[list[(r,g,b)]]  — n_rows 行 × n_cols 列
+    """
+    if not full_pool or len(full_pool) < 3:
+        # 退化：生成灰度渐变
+        rows = []
+        for ri in range(n_rows):
+            row = []
+            for ci in range(n_cols):
+                t = ci / max(n_cols - 1, 1)
+                v = int(60 + t * 180)
+                row.append((v, v, v))
+            rows.append(row)
+        return rows
+
+    # ── 1. 按色相聚类 ──
+    # 将颜色转 HSV 并按色相排序
+    indexed = [(rgb_to_hsv(*c), c) for c in full_pool]
+    indexed.sort(key=lambda x: x[0][0])  # 按 hue 排序
+
+    # 在色相环上找间隙进行聚类（环形，所以首尾也要考虑）
+    gaps = []
+    for i in range(len(indexed)):
+        next_i = (i + 1) % len(indexed)
+        h1 = indexed[i][0][0]
+        h2 = indexed[next_i][0][0]
+        if next_i > i:
+            gap = h2 - h1
+        else:
+            gap = h2 + 360 - h1  # 环形跨越
+        gaps.append((gap, i))
+
+    # 按间隙从大到小排序，在最大的 n_rows-1 个间隙处切分
+    # 但要确保切出来的簇至少有一个颜色
+    gaps.sort(key=lambda x: x[0], reverse=True)
+
+    # 找出分割点（在哪些索引之后切分）
+    split_after = set()
+    for gap, idx in gaps:
+        if len(split_after) >= n_rows - 1:
+            break
+        split_after.add(idx)
+
+    # 按分割点构建簇
+    clusters = []
+    start = 0
+    for i in range(len(indexed)):
+        if i in split_after:
+            clusters.append(indexed[start:i + 1])
+            start = i + 1
+    if start < len(indexed):
+        clusters.append(indexed[start:])
+
+    # ── 2. 挑选 n_rows 个最好的簇 ──
+    # 优先选颜色数多的簇，同时确保色相分散
+    # 计算每个簇的平均色相
+    def cluster_avg_hue(cluster):
+        if not cluster:
+            return 0
+        return sum(c[0][0] for c in cluster) / len(cluster)
+
+    clusters_with_meta = [(len(c), cluster_avg_hue(c), c) for c in clusters]
+    # 按大小降序
+    clusters_with_meta.sort(key=lambda x: x[0], reverse=True)
+
+    # 贪心选择：优先大簇，但色相差距 > 40°
+    selected_clusters = []
+    selected_hues = []
+    for size, avg_h, cluster in clusters_with_meta:
+        if len(selected_clusters) >= n_rows:
+            break
+        # 检查与已选簇的色相距离
+        too_close = False
+        for sh in selected_hues:
+            dist = min(abs(avg_h - sh), 360 - abs(avg_h - sh))
+            if dist < 40:
+                too_close = True
+                break
+        if not too_close:
+            selected_clusters.append(cluster)
+            selected_hues.append(avg_h)
+
+    # 如果不够 n_rows，放宽色相距离限制
+    if len(selected_clusters) < n_rows:
+        for size, avg_h, cluster in clusters_with_meta:
+            if cluster in selected_clusters:
+                continue
+            if len(selected_clusters) >= n_rows:
+                break
+            selected_clusters.append(cluster)
+
+    # ── 3. 每个簇内按亮度排序，取 n_cols 个 ──
+    rows = []
+    for cluster in selected_clusters:
+        # 按亮度 (v) 排序
+        cluster_sorted = sorted(cluster, key=lambda x: x[0][2])
+        row_colors = [c[1] for c in cluster_sorted]
+
+        # 去重（合并过于接近的颜色）
+        deduped = [row_colors[0]]
+        for c in row_colors[1:]:
+            if color_distance(c, deduped[-1]) > 10:
+                deduped.append(c)
+
+        # 均匀采样到 n_cols 个
+        if len(deduped) >= n_cols:
+            indices = np.linspace(0, len(deduped) - 1, n_cols).astype(int)
+            final_row = [deduped[i] for i in indices]
+        else:
+            # 不足时在色系内插值补全
+            final_row = list(deduped)
+            need = n_cols - len(deduped)
+            # 在已有颜色之间线性插值
+            while len(final_row) < n_cols and len(final_row) >= 2:
+                # 找间距最大的相邻对
+                best_gap = -1
+                best_pos = 0
+                for i in range(len(final_row) - 1):
+                    d = color_distance(final_row[i], final_row[i + 1])
+                    if d > best_gap:
+                        best_gap = d
+                        best_pos = i
+                if best_gap < 0:
+                    break
+                # 在中间插入插值色
+                c1, c2 = final_row[best_pos], final_row[best_pos + 1]
+                mid = tuple((c1[j] + c2[j]) // 2 for j in range(3))
+                final_row.insert(best_pos + 1, mid)
+                need -= 1
+                if need <= 0:
+                    break
+            # 如果仍然不足（只有 1 个颜色），通过微调色相和亮度扩展
+            while len(final_row) < n_cols:
+                base = final_row[-1] if final_row else (128, 128, 128)
+                h, s, v = rgb_to_hsv(*base)
+                t = len(final_row) / max(n_cols - 1, 1)
+                new_h = (h + (t - 0.5) * 20) % 360
+                new_v = min(1.0, max(0.1, v * (0.5 + t)))
+                new_c = hsv_to_rgb(new_h, min(s, 1.0), new_v)
+                final_row.append(tuple(int(x) for x in new_c))
+        rows.append(final_row)
+
+    # ── 4. 按平均色相排序各行，使纵向第一列分布均匀 ──
+    rows_with_hue = [(sum(rgb_to_hsv(*c)[0] for c in row) / len(row), row) for row in rows]
+    rows_with_hue.sort(key=lambda x: x[0])
+    rows = [r for _, r in rows_with_hue]
+
+    # ── 5. 不足 n_rows 时，从已有行衍生补全 ──
+    while len(rows) < n_rows:
+        # 取平均色相间距最大的相邻两行，在中间插入衍生行
+        if len(rows) >= 2:
+            best_gap = -1
+            best_i = 0
+            for i in range(len(rows) - 1):
+                h1 = sum(rgb_to_hsv(*c)[0] for c in rows[i]) / len(rows[i])
+                h2 = sum(rgb_to_hsv(*c)[0] for c in rows[i + 1]) / len(rows[i + 1])
+                gap = min(abs(h2 - h1), 360 - abs(h2 - h1))
+                if gap > best_gap:
+                    best_gap = gap
+                    best_i = i
+            # 在两行之间插值生成新行
+            ref = rows[best_i]
+            h_ref = sum(rgb_to_hsv(*c)[0] for c in ref) / len(ref)
+            new_row = []
+            for ci in range(n_cols):
+                t = ci / max(n_cols - 1, 1)
+                base = ref[ci]
+                bh, bs, bv = rgb_to_hsv(*base)
+                new_h = (h_ref + best_gap / 2 + t * 15 - 7.5) % 360
+                new_v = min(1.0, max(0.1, bv * (0.8 + t * 0.4)))
+                new_row.append(hsv_to_rgb(new_h, min(bs * 0.9, 1.0), new_v))
+            rows.insert(best_i + 1, new_row)
+        else:
+            # 只有 1 行：色相偏移生成新行
+            ref = rows[0]
+            offset = 360 / n_rows * len(rows)
+            new_row = []
+            for ci in range(n_cols):
+                t = ci / max(n_cols - 1, 1)
+                base = ref[ci]
+                bh, bs, bv = rgb_to_hsv(*base)
+                new_h = (bh + offset + t * 10) % 360
+                new_v = min(1.0, max(0.1, bv * (0.7 + t * 0.5)))
+                new_row.append(hsv_to_rgb(new_h, min(bs, 1.0), new_v))
+            rows.append(new_row)
+
+    return rows
+
+
 # ══════════════════════════════════════════════════════════════════
 #  备选配色方案（多种风格呈现给用户选择）
 # ══════════════════════════════════════════════════════════════════
 
-def generate_multiple_schemes(dominant_color, full_pool=None, num_line_colors=5):
+def generate_multiple_schemes(dominant_color, full_pool=None, num_line_rows=5, num_line_cols=5):
     """
     生成多种配色方案供用户选择
     """
     schemes = []
 
     # ── 方案1: 标准方案 ──
-    reg1, riz1 = generate_color_scheme(dominant_color, full_pool=full_pool, num_line_colors=num_line_colors)
+    reg1, riz1 = generate_color_scheme(dominant_color, full_pool=full_pool,
+                                        num_line_rows=num_line_rows, num_line_cols=num_line_cols)
     schemes.append({'name': '标准方案', 'regular': reg1, 'riztime': riz1})
 
     r, g, b = dominant_color
@@ -689,8 +896,9 @@ def generate_multiple_schemes(dominant_color, full_pool=None, num_line_colors=5)
     # ── 方案2: 高对比方案（从全色池分配） ──
     reg2_bg, reg2_note, reg2_ui = _assign_roles(full_pool, h, theme='regular')
     reg2_note = hsv_to_rgb(h, min(s * 1.2, 1.0), min(v * 1.1, 0.92))
-    reg2_lines = _generate_line_colors(h, s * 1.1, v * 1.1, num_line_colors, 'regular')
-    reg2_lines = [(clamp(c[0]), clamp(c[1]), clamp(c[2])) for c in reg2_lines]
+    reg2_lines = build_line_color_rows_from_pool(full_pool, n_rows=num_line_rows, n_cols=num_line_cols)
+    # 对行内颜色做高对比增强
+    reg2_lines = [[(clamp(c[0]), clamp(c[1]), clamp(c[2])) for c in row] for row in reg2_lines]
 
     reg2 = {
         'note': reg2_note, 'background': reg2_bg,
@@ -701,8 +909,8 @@ def generate_multiple_schemes(dominant_color, full_pool=None, num_line_colors=5)
     riz2_bg, riz2_note, riz2_ui = _assign_roles(full_pool, h, theme='riztime')
     riz2_note = hsv_to_rgb(h, 1.0, 0.95)
     riz2_ui = hsv_to_rgb((h + 30) % 360, min(s * 1.2, 1.0), 0.95)
-    riz2_lines = _generate_line_colors(h, 1.0, 0.9, num_line_colors, 'riztime')
-    riz2_lines = [(clamp(c[0]), clamp(c[1]), clamp(c[2])) for c in riz2_lines]
+    riz2_lines = build_line_color_rows_from_pool(full_pool, n_rows=num_line_rows, n_cols=num_line_cols)
+    riz2_lines = [[(clamp(c[0]), clamp(c[1]), clamp(c[2])) for c in row] for row in riz2_lines]
 
     riz2 = {
         'note': riz2_note, 'background': riz2_bg,
@@ -719,8 +927,8 @@ def generate_multiple_schemes(dominant_color, full_pool=None, num_line_colors=5)
     reg3_bg, reg3_note, reg3_ui = _assign_roles(full_pool, h, theme='regular')
     reg3_note = hsv_to_rgb(h, soft_s, soft_v)
     reg3_ui = hsv_to_rgb((h + 60) % 360, soft_s * 0.8, min(soft_v * 1.1, 0.9))
-    reg3_lines = _generate_line_colors(h, soft_s, soft_v, num_line_colors, 'regular')
-    reg3_lines = [(clamp(c[0]), clamp(c[1]), clamp(c[2])) for c in reg3_lines]
+    reg3_lines = build_line_color_rows_from_pool(full_pool, n_rows=num_line_rows, n_cols=num_line_cols)
+    reg3_lines = [[(clamp(c[0]), clamp(c[1]), clamp(c[2])) for c in row] for row in reg3_lines]
 
     reg3 = {
         'note': reg3_note, 'background': reg3_bg,
@@ -730,8 +938,8 @@ def generate_multiple_schemes(dominant_color, full_pool=None, num_line_colors=5)
 
     riz3_bg, riz3_note, riz3_ui = _assign_roles(full_pool, h, theme='riztime')
     riz3_note = hsv_to_rgb(h, min(soft_s * 1.3, 1.0), min(soft_v * 1.2, 0.92))
-    riz3_lines = _generate_line_colors(h, soft_s * 1.1, soft_v * 1.1, num_line_colors, 'riztime')
-    riz3_lines = [(clamp(c[0]), clamp(c[1]), clamp(c[2])) for c in riz3_lines]
+    riz3_lines = build_line_color_rows_from_pool(full_pool, n_rows=num_line_rows, n_cols=num_line_cols)
+    riz3_lines = [[(clamp(c[0]), clamp(c[1]), clamp(c[2])) for c in row] for row in riz3_lines]
 
     riz3 = {
         'note': riz3_note, 'background': riz3_bg,
@@ -749,10 +957,11 @@ def generate_multiple_schemes(dominant_color, full_pool=None, num_line_colors=5)
 # ══════════════════════════════════════════════════════════════════
 
 def create_result_figure(image_path, dominant_colors, all_schemes, all_line_groups,
-                         num_line_colors, dpi=150):
+                         num_line_colors, dpi=150, global_line_rows=None):
     """
-    创建结果展示图（v3: 色号在色块内、点击复制HEX、可滚动）
-    返回: (fig, color_axes) — color_axes 是 {axes: hex_str} 映射
+    创建结果展示图（v3: 色号在色块内、线颜色行×列矩阵布局）
+    返回: fig
+    global_line_rows: 全局线颜色行（从全色池按色系分组），用于底部展示
     """
     fs = FONT_SIZES
     num_themes = len(dominant_colors)
@@ -771,6 +980,8 @@ def create_result_figure(image_path, dominant_colors, all_schemes, all_line_grou
 
     fig = Figure(figsize=(fig_width, fig_height), dpi=dpi)
     fig.patch.set_facecolor('#1a1a2e')
+    # figure 坐标系宽高比（用于将 figure 坐标宽度换算为物理正方形高度）
+    fig_aspect = fig_width / fig_height
 
     y = 1.0
     margin_left = 0.06
@@ -805,8 +1016,8 @@ def create_result_figure(image_path, dominant_colors, all_schemes, all_line_grou
         ax_sort = fig.add_axes([margin_left + 0.12, y - 0.14, 0.28, 0.14])
         ax_sort.imshow(sorted_preview)
         ax_sort.axis('off')
-        ax_sort.text(0.5, -0.12, u'像素排序重组',
-                     fontsize=5, color='#666', ha='center', va='top',
+        ax_sort.text(1.02, 0.5, u'像素排序重组',
+                     fontsize=5, color='#666', ha='left', va='center',
                      transform=ax_sort.transAxes)
     except Exception:
         pass
@@ -825,9 +1036,12 @@ def create_result_figure(image_path, dominant_colors, all_schemes, all_line_grou
             (0, 0), 1, 1, boxstyle="round,pad=0.04",
             facecolor=(r/255, g/255, b/255),
             edgecolor='white', linewidth=1.2))
-        ax_dc.text(0.5, 1.25, f'主题{i+1}', fontsize=fs['item_name'], color='#aaa',
-                   ha='center', va='bottom', transform=ax_dc.transAxes,
-                   fontproperties=font_manager.FontProperties(family=_FONT_NAME)
+        # 文字放在色块内部，根据背景亮度选白/黑字
+        text_color = '#fff' if relative_luminance(r, g, b) < 0.5 else '#222'
+        ax_dc.text(0.5, 0.5, f'主题{i+1}', fontsize=fs['item_name'], color=text_color,
+                   ha='center', va='center', transform=ax_dc.transAxes,
+                   fontweight='bold',
+                   fontproperties=font_manager.FontProperties(family=_FONT_NAME, weight='bold')
                    if FONT_AVAILABLE else {})
         ax_dc.set_xlim(0, 1)
         ax_dc.set_ylim(0, 1)
@@ -925,7 +1139,7 @@ def create_result_figure(image_path, dominant_colors, all_schemes, all_line_grou
                     ax_block.set_ylim(0, 1)
                     ax_block.axis('off')
 
-                # 线颜色
+                # ── 线颜色（行×列矩阵：每行=同一色系，横向渐变）──
                 line_y = y - block_h - 0.03
                 ax_line_label = fig.add_axes([part_x, line_y - 0.02, part_w, 0.02])
                 ax_line_label.axis('off')
@@ -933,83 +1147,88 @@ def create_result_figure(image_path, dominant_colors, all_schemes, all_line_grou
                                    ha='left', va='center',
                                    fontproperties=font_manager.FontProperties(family=_FONT_NAME)
                                    if FONT_AVAILABLE else {})
-                line_y -= 0.022
+                line_y -= 0.025
 
-                line_block_w = part_w / (len(line_cs) + 1)
-                for li, lc in enumerate(line_cs):
-                    lx = part_x + li * (line_block_w + 0.01)
-                    lr, lg, lb = lc
-                    lhex = rgb_to_hex(lr, lg, lb).lstrip('#')
-                    ax_l = fig.add_axes([lx, line_y - 0.09, line_block_w * 0.9, 0.09])
-                    ax_l.add_patch(patches.FancyBboxPatch(
-                        (0, 0), 1, 1, boxstyle="round,pad=0.06",
-                        facecolor=(lr/255, lg/255, lb/255),
-                        edgecolor='#555', linewidth=1))
-                    lt_color = '#000' if relative_luminance(lr, lg, lb) > 0.3 else '#FFF'
-                    ax_l.text(0.5, 0.6, f'#{lhex}', fontsize=fs['line_rgb'] + 1,
-                              color=lt_color if lt_color == '#FFF' else '#444',
-                              ha='center', va='center', weight='bold',
-                              transform=ax_l.transAxes,
-                              fontproperties=font_manager.FontProperties(family=_FONT_NAME, weight='bold')
-                              if FONT_AVAILABLE else {})
-                    ax_l.set_xlim(0, 1)
-                    ax_l.set_ylim(0, 1)
-                    ax_l.axis('off')
+                n_rows = len(line_cs)
+                n_cols = len(line_cs[0]) if n_rows > 0 else 0
+                cell_w = part_w / max(n_cols, 1)
+                # 物理正方形：高度 = 宽度 × figure宽高比
+                row_h = cell_w * 0.92 * fig_aspect
+                row_gap = 0.004
+                # 动态字号：色块物理宽度 (pts) / 每字符平均宽度 ≈ 可容纳字号
+                cell_pts_w = cell_w * 0.92 * fig_width * 72
+                line_fs = max(3.0, min(7.0, cell_pts_w / 4.5))
 
-            y = min(y, line_y - 0.09) - 0.04
+                for ri, row in enumerate(line_cs):
+                    ry = line_y - ri * (row_h + row_gap)
+                    for ci, lc in enumerate(row):
+                        cx = part_x + ci * cell_w
+                        lr, lg, lb = lc
+                        lhex = rgb_to_hex(lr, lg, lb).lstrip('#')
+                        ax_l = fig.add_axes([cx, ry - row_h, cell_w * 0.92, row_h])
+                        ax_l.add_patch(patches.FancyBboxPatch(
+                            (0, 0), 1, 1, boxstyle="round,pad=0.06",
+                            facecolor=(lr/255, lg/255, lb/255),
+                            edgecolor='#555', linewidth=0.8))
+                        lt_color = '#000' if relative_luminance(lr, lg, lb) > 0.3 else '#FFF'
+                        ax_l.text(0.5, 0.5, f'#{lhex}', fontsize=line_fs,
+                                  color=lt_color if lt_color == '#FFF' else '#444',
+                                  ha='center', va='center', weight='bold',
+                                  transform=ax_l.transAxes,
+                                  fontproperties=font_manager.FontProperties(family=_FONT_NAME, weight='bold')
+                                  if FONT_AVAILABLE else {})
+                        ax_l.set_xlim(0, 1)
+                        ax_l.set_ylim(0, 1)
+                        ax_l.axis('off')
 
-        # ── 线颜色组 (从色池选取, 含相近色) ──
-        if theme_idx < len(all_line_groups) and all_line_groups[theme_idx]:
-            groups = all_line_groups[theme_idx]
-            ax_lg_label = fig.add_axes([margin_left, y - 0.03, content_width, 0.03])
-            ax_lg_label.axis('off')
-            ax_lg_label.text(0, 0.5, u'线颜色 (从色池选取, 含相近色分组):',
-                             fontsize=7, color='#888', ha='left', va='center')
-            y -= 0.04
+                line_bottom = line_y - n_rows * (row_h + row_gap)
 
-            for gi, grp in enumerate(groups):
-                mc = grp['main']
-                sims = grp['similars']
-                mr, mg, mb = mc
-                mhex = f'{mr:02X}{mg:02X}{mb:02X}'
+            y = min(y, line_bottom) - 0.04
 
-                # 主颜色块 + HEX
-                grp_x = margin_left
-                main_w = 0.06
-                ax_mc = fig.add_axes([grp_x, y - 0.12, main_w, 0.12])
-                ax_mc.add_patch(patches.FancyBboxPatch(
+    # ── 全局线颜色（按色系分行，从全色池提取）──
+    if global_line_rows and len(global_line_rows) > 0:
+        y -= 0.02
+        ax_gl_label = fig.add_axes([margin_left, y - 0.03, content_width, 0.03])
+        ax_gl_label.axis('off')
+        ax_gl_label.text(0, 0.5, u'全部线颜色（按色系分行，横向渐变）:',
+                         fontsize=7, color='#888', ha='left', va='center',
+                         fontproperties=font_manager.FontProperties(family=_FONT_NAME)
+                         if FONT_AVAILABLE else {})
+        y -= 0.045
+
+        n_gl_rows = len(global_line_rows)
+        n_gl_cols = len(global_line_rows[0]) if n_gl_rows > 0 else 0
+        gl_cell_w = content_width / max(n_gl_cols, 1)
+        # 物理正方形：高度 = 宽度 × figure宽高比
+        gl_row_h = gl_cell_w * 0.92 * fig_aspect
+        gl_gap = 0.004
+        # 动态字号
+        gl_cell_pts_w = gl_cell_w * 0.92 * fig_width * 72
+        gl_line_fs = max(3.0, min(7.0, gl_cell_pts_w / 4.5))
+
+        for ri, row in enumerate(global_line_rows):
+            ry = y - ri * (gl_row_h + gl_gap)
+            for ci, lc in enumerate(row):
+                cx = margin_left + ci * gl_cell_w
+                lr, lg, lb = lc
+                lhex = rgb_to_hex(lr, lg, lb).lstrip('#')
+                ax_gl = fig.add_axes([cx, ry - gl_row_h, gl_cell_w * 0.92, gl_row_h])
+                ax_gl.add_patch(patches.FancyBboxPatch(
                     (0, 0), 1, 1, boxstyle="round,pad=0.06",
-                    facecolor=(mr/255, mg/255, mb/255),
-                    edgecolor='white', linewidth=1.2))
-                mc_text_color = '#000' if relative_luminance(mr, mg, mb) > 0.3 else '#FFF'
-                ax_mc.text(0.5, 0.45, f'#{mhex}', fontsize=5.5, color=mc_text_color,
-                           ha='center', va='center', weight='bold', transform=ax_mc.transAxes)
-                ax_mc.set_xlim(0, 1); ax_mc.set_ylim(0, 1); ax_mc.axis('off')
+                    facecolor=(lr/255, lg/255, lb/255),
+                    edgecolor='#555', linewidth=0.8))
+                gl_text_color = '#000' if relative_luminance(lr, lg, lb) > 0.3 else '#FFF'
+                ax_gl.text(0.5, 0.5, f'#{lhex}', fontsize=gl_line_fs,
+                           color=gl_text_color if gl_text_color == '#FFF' else '#444',
+                           ha='center', va='center', weight='bold',
+                           transform=ax_gl.transAxes,
+                           fontproperties=font_manager.FontProperties(family=_FONT_NAME, weight='bold')
+                           if FONT_AVAILABLE else {})
+                ax_gl.set_xlim(0, 1)
+                ax_gl.set_ylim(0, 1)
+                ax_gl.axis('off')
 
-                # 相近色块
-                sim_x = grp_x + main_w + 0.01
-                sim_w_total = content_width - main_w - 0.03
-                num_sims = len(sims) if sims else 0
-                if num_sims > 0:
-                    sim_bw = sim_w_total / max(num_sims, 1)
-                    for si, sc in enumerate(sims):
-                        sx = sim_x + si * sim_bw
-                        sr, sg, sb = sc
-                        shex = f'{sr:02X}{sg:02X}{sb:02X}'
-                        ax_sc = fig.add_axes([sx, y - 0.10, sim_bw * 0.9, 0.10])
-                        ax_sc.add_patch(patches.FancyBboxPatch(
-                            (0, 0), 1, 1, boxstyle="round,pad=0.04",
-                            facecolor=(sr/255, sg/255, sb/255),
-                            edgecolor='#555', linewidth=0.7))
-                        sc_color = '#000' if relative_luminance(sr, sg, sb) > 0.3 else '#FFF'
-                        ax_sc.text(0.5, 0.4, f'#{shex}', fontsize=5, color=sc_color,
-                                   ha='center', va='center', weight='bold', transform=ax_sc.transAxes)
-                        ax_sc.set_xlim(0, 1); ax_sc.set_ylim(0, 1); ax_sc.axis('off')
-
-                y -= 0.14
-            y -= 0.04
-
-        y -= 0.08
+        y -= n_gl_rows * (gl_row_h + gl_gap) + 0.04
 
     # ── 右上角时间戳 ──
     ax_ts = fig.add_axes([0.65, 0.95, 0.34, 0.035])
@@ -1047,26 +1266,36 @@ class RizlineColorSelectorApp:
         master.configure(bg='#1a1a2e')
         master.minsize(750, 600)
 
+        # 检测可用字体：优先思源黑体
+        _avail = {f.lower() for f in tkfont.families(master)}
+        self.tk_font = 'TkDefaultFont'
+        for _f in ['source han sans cn', 'microsoft yahei ui', 'microsoft yahei', 'simhei']:
+            if _f in _avail:
+                self.tk_font = next(ff for ff in tkfont.families(master) if ff.lower() == _f)
+                break
+
         # 变量
         self.image_path = tk.StringVar()
         self.num_dominant = tk.IntVar(value=4)
-        self.num_line_colors = tk.IntVar(value=5)
-        self.similarity_threshold = tk.IntVar(value=40)
+        self.num_line_rows = tk.IntVar(value=5)
+        self.num_line_cols = tk.IntVar(value=5)
         self.output_path = tk.StringVar()
         self.scheme_mode = tk.StringVar(value='single')
 
         self._build_ui()
 
     def _build_ui(self):
+        F = self.tk_font  # 统一字体（思源黑体优先）
+
         # 标题
         title = tk.Label(self.master, text='🎨 Rizline 配色方案生成器',
-                         font=('Microsoft YaHei UI', 22, 'bold'),
+                         font=(F, 22, 'bold'),
                          bg='#1a1a2e', fg='white')
         title.pack(pady=(20, 3))
 
         desc = tk.Label(self.master,
                         text='从图片提取主题色 → 生成谱面配色方案（常规 + Riztime）',
-                        font=('Microsoft YaHei UI', 12),
+                        font=(F, 12),
                         bg='#1a1a2e', fg='#aaa')
         desc.pack(pady=(0, 15))
 
@@ -1074,8 +1303,8 @@ class RizlineColorSelectorApp:
         main_frame.pack(fill=tk.BOTH, expand=True, padx=30, pady=5)
 
         # ── 图片选择 ──
-        img_frame = tk.LabelFrame(main_frame, text='📷 选择图片',
-                                  font=('Microsoft YaHei UI', 12, 'bold'),
+        img_frame = tk.LabelFrame(main_frame, text='选择图片',
+                                  font=(F, 12, 'bold'),
                                   bg='#16213e', fg='white',
                                   relief=tk.GROOVE, bd=2)
         img_frame.pack(fill=tk.X, pady=(0, 12))
@@ -1085,7 +1314,7 @@ class RizlineColorSelectorApp:
 
         btn_select = tk.Button(btn_frame_inner, text='📂 浏览图片...',
                                command=self._select_image,
-                               font=('Microsoft YaHei UI', 12),
+                               font=(F, 12),
                                bg='#0f3460', fg='white',
                                activebackground='#1a5276',
                                activeforeground='white',
@@ -1095,12 +1324,12 @@ class RizlineColorSelectorApp:
 
         self.lbl_image = tk.Label(btn_frame_inner, text='未选择图片',
                                   bg='#16213e', fg='#888',
-                                  font=('Microsoft YaHei UI', 11))
+                                  font=(F, 11))
         self.lbl_image.pack(side=tk.LEFT, padx=(15, 0))
 
         # ── 参数设置（Slider 风格） ──
-        param_frame = tk.LabelFrame(main_frame, text='⚙ 参数设置',
-                                    font=('Microsoft YaHei UI', 12, 'bold'),
+        param_frame = tk.LabelFrame(main_frame, text='参数设置',
+                                    font=(F, 12, 'bold'),
                                     bg='#16213e', fg='white',
                                     relief=tk.GROOVE, bd=2)
         param_frame.pack(fill=tk.X, pady=(0, 12))
@@ -1109,76 +1338,70 @@ class RizlineColorSelectorApp:
         row1 = tk.Frame(param_frame, bg='#16213e')
         row1.pack(fill=tk.X, padx=15, pady=(12, 5))
         tk.Label(row1, text='主题色数量:', bg='#16213e', fg='#ccc',
-                 font=('Microsoft YaHei UI', 11)).pack(side=tk.LEFT)
-        self.lbl_dominant_val = tk.Label(row1, text='4', bg='#16213e', fg='#8cf',
-                                          font=('Microsoft YaHei UI', 11, 'bold'))
+                 font=(F, 11)).pack(side=tk.LEFT)
+        self.lbl_dominant_val = tk.Label(row1, text=' 4', bg='#16213e', fg='#8cf',
+                                          font=(F, 11, 'bold'), width=3, anchor='center')
         self.lbl_dominant_val.pack(side=tk.LEFT, padx=(10, 0))
         slider_dominant = tk.Scale(row1, from_=1, to=10, orient=tk.HORIZONTAL,
                                     variable=self.num_dominant,
                                     bg='#16213e', fg='white', troughcolor='#0f3460',
-                                    activebackground='#e94560',
-                                    highlightbackground='#16213e',
-                                    length=280, width=18, sliderlength=26,
-                                    font=('Microsoft YaHei UI', 9))
+                                    highlightthickness=0, bd=0,
+                                    length=280, showvalue=0)
         slider_dominant.pack(side=tk.LEFT, padx=(18, 0), fill=tk.X, expand=True)
         slider_dominant.bind('<Motion>', lambda e: self.lbl_dominant_val.configure(
-            text=str(self.num_dominant.get())))
+            text=f' {self.num_dominant.get()}'))
 
-        # 线颜色数量 Slider
+        # 线颜色行数 Slider（纵向）
         row2 = tk.Frame(param_frame, bg='#16213e')
         row2.pack(fill=tk.X, padx=15, pady=(8, 5))
-        tk.Label(row2, text='每组线颜色数:', bg='#16213e', fg='#ccc',
-                 font=('Microsoft YaHei UI', 11)).pack(side=tk.LEFT)
-        self.lbl_line_val = tk.Label(row2, text='5', bg='#16213e', fg='#8cf',
-                                      font=('Microsoft YaHei UI', 11, 'bold'))
-        self.lbl_line_val.pack(side=tk.LEFT, padx=(10, 0))
-        slider_line = tk.Scale(row2, from_=3, to=10, orient=tk.HORIZONTAL,
-                                variable=self.num_line_colors,
+        tk.Label(row2, text='线颜色 行数:', bg='#16213e', fg='#ccc',
+                 font=(F, 11)).pack(side=tk.LEFT)
+        self.lbl_line_rows = tk.Label(row2, text=' 5', bg='#16213e', fg='#8cf',
+                                       font=(F, 11, 'bold'), width=3, anchor='center')
+        self.lbl_line_rows.pack(side=tk.LEFT, padx=(10, 0))
+        slider_rows = tk.Scale(row2, from_=2, to=10, orient=tk.HORIZONTAL,
+                                variable=self.num_line_rows,
                                 bg='#16213e', fg='white', troughcolor='#0f3460',
-                                activebackground='#e94560',
-                                highlightbackground='#16213e',
-                                length=280, width=18, sliderlength=26,
-                                font=('Microsoft YaHei UI', 9))
-        slider_line.pack(side=tk.LEFT, padx=(18, 0), fill=tk.X, expand=True)
-        slider_line.bind('<Motion>', lambda e: self.lbl_line_val.configure(
-            text=str(self.num_line_colors.get())))
+                                highlightthickness=0, bd=0,
+                                length=280, showvalue=0)
+        slider_rows.pack(side=tk.LEFT, padx=(18, 0), fill=tk.X, expand=True)
+        slider_rows.bind('<Motion>', lambda e: self.lbl_line_rows.configure(
+            text=f' {self.num_line_rows.get()}'))
 
-        # 相似色阈值 Slider
-        row_sim = tk.Frame(param_frame, bg='#16213e')
-        row_sim.pack(fill=tk.X, padx=15, pady=(8, 5))
-        tk.Label(row_sim, text='相近色阈值:', bg='#16213e', fg='#ccc',
-                 font=('Microsoft YaHei UI', 11)).pack(side=tk.LEFT)
-        self.lbl_sim_val = tk.Label(row_sim, text='40', bg='#16213e', fg='#8cf',
-                                     font=('Microsoft YaHei UI', 11, 'bold'))
-        self.lbl_sim_val.pack(side=tk.LEFT, padx=(10, 0))
-        slider_sim = tk.Scale(row_sim, from_=20, to=70, orient=tk.HORIZONTAL,
-                               variable=self.similarity_threshold,
-                               bg='#16213e', fg='white', troughcolor='#0f3460',
-                               activebackground='#e94560',
-                               highlightbackground='#16213e',
-                               length=280, width=18, sliderlength=26,
-                               font=('Microsoft YaHei UI', 9))
-        slider_sim.pack(side=tk.LEFT, padx=(18, 0), fill=tk.X, expand=True)
-        slider_sim.bind('<Motion>', lambda e: self.lbl_sim_val.configure(
-            text=str(self.similarity_threshold.get())))
+        # 线颜色列数 Slider（横向）
+        row3 = tk.Frame(param_frame, bg='#16213e')
+        row3.pack(fill=tk.X, padx=15, pady=(8, 5))
+        tk.Label(row3, text='线颜色 列数:', bg='#16213e', fg='#ccc',
+                 font=(F, 11)).pack(side=tk.LEFT)
+        self.lbl_line_cols = tk.Label(row3, text=' 5', bg='#16213e', fg='#8cf',
+                                       font=(F, 11, 'bold'), width=3, anchor='center')
+        self.lbl_line_cols.pack(side=tk.LEFT, padx=(10, 0))
+        slider_cols = tk.Scale(row3, from_=2, to=10, orient=tk.HORIZONTAL,
+                                variable=self.num_line_cols,
+                                bg='#16213e', fg='white', troughcolor='#0f3460',
+                                highlightthickness=0, bd=0,
+                                length=280, showvalue=0)
+        slider_cols.pack(side=tk.LEFT, padx=(18, 0), fill=tk.X, expand=True)
+        slider_cols.bind('<Motion>', lambda e: self.lbl_line_cols.configure(
+            text=f' {self.num_line_cols.get()}'))
 
         # 配色方案模式
-        row3 = tk.Frame(param_frame, bg='#16213e')
-        row3.pack(fill=tk.X, padx=15, pady=(8, 12))
-        tk.Label(row3, text='配色模式:', bg='#16213e', fg='#ccc',
-                 font=('Microsoft YaHei UI', 11)).pack(side=tk.LEFT)
-        self.mode_combo = ttk.Combobox(row3, textvariable=self.scheme_mode,
+        row_mode = tk.Frame(param_frame, bg='#16213e')
+        row_mode.pack(fill=tk.X, padx=15, pady=(8, 12))
+        tk.Label(row_mode, text='配色模式:', bg='#16213e', fg='#ccc',
+                 font=(F, 11)).pack(side=tk.LEFT)
+        self.mode_combo = ttk.Combobox(row_mode, textvariable=self.scheme_mode,
                                         values=['single', 'multiple'],
                                         state='readonly', width=14,
-                                        font=('Microsoft YaHei UI', 11))
+                                        font=(F, 11))
         self.mode_combo.pack(side=tk.LEFT, padx=(14, 0))
-        tk.Label(row3, text='single=单方案  multiple=三方案对比',
+        tk.Label(row_mode, text='single=单方案  multiple=三方案对比',
                  bg='#16213e', fg='#666',
-                 font=('Microsoft YaHei UI', 10)).pack(side=tk.LEFT, padx=(14, 0))
+                 font=(F, 10)).pack(side=tk.LEFT, padx=(14, 0))
 
         # ── 输出设置 ──
-        out_frame = tk.LabelFrame(main_frame, text='💾 输出设置',
-                                  font=('Microsoft YaHei UI', 12, 'bold'),
+        out_frame = tk.LabelFrame(main_frame, text='输出设置',
+                                  font=(F, 12, 'bold'),
                                   bg='#16213e', fg='white',
                                   relief=tk.GROOVE, bd=2)
         out_frame.pack(fill=tk.X, pady=(0, 12))
@@ -1186,16 +1409,16 @@ class RizlineColorSelectorApp:
         out_row = tk.Frame(out_frame, bg='#16213e')
         out_row.pack(fill=tk.X, padx=15, pady=10)
         tk.Label(out_row, text='输出文件夹:', bg='#16213e', fg='#ccc',
-                 font=('Microsoft YaHei UI', 11)).pack(side=tk.LEFT)
+                 font=(F, 11)).pack(side=tk.LEFT)
 
         self.output_path.set(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output'))
         lbl_out = tk.Label(out_row, textvariable=self.output_path,
                            bg='#16213e', fg='#8cf',
-                           font=('Microsoft YaHei UI', 10))
+                           font=(F, 10))
         lbl_out.pack(side=tk.LEFT, padx=(14, 0))
 
         btn_out = tk.Button(out_row, text='更改...', command=self._select_output_dir,
-                            font=('Microsoft YaHei UI', 10),
+                            font=(F, 10),
                             bg='#0f3460', fg='white',
                             activebackground='#1a5276', relief=tk.FLAT,
                             cursor='hand2', padx=14, pady=4)
@@ -1207,7 +1430,7 @@ class RizlineColorSelectorApp:
 
         self.btn_generate = tk.Button(btn_frame, text='🚀 生成配色方案',
                                       command=self._generate,
-                                      font=('Microsoft YaHei UI', 15, 'bold'),
+                                      font=(F, 15, 'bold'),
                                       bg='#e94560', fg='white',
                                       activebackground='#c73a52',
                                       activeforeground='white',
@@ -1220,7 +1443,7 @@ class RizlineColorSelectorApp:
 
         # ── 状态信息 ──
         self.status_text = tk.Text(main_frame, height=6, bg='#0d1117', fg='#8b949e',
-                                    font=('Consolas', 11), relief=tk.FLAT,
+                                    font=(F, 11), relief=tk.FLAT,
                                     insertbackground='white')
         self.status_text.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         self.status_text.insert(tk.END, '就绪 — 选择一张图片后点击"生成配色方案"\n')
@@ -1256,19 +1479,22 @@ class RizlineColorSelectorApp:
             return
 
         self.btn_generate.configure(state=tk.DISABLED)
-        self.progress.start()
+        self.progress.start(10)
+        self.master.update_idletasks()
         self._log('🔄 正在处理...')
         self.master.update()
 
         try:
             n_colors = self.num_dominant.get()
-            n_line = self.num_line_colors.get()
+            n_line_rows = self.num_line_rows.get()
+            n_line_cols = self.num_line_cols.get()
             mode = self.scheme_mode.get()
 
             # 1. 提取主题色 + accent 色 + minor 色
             self._log(f'📷 提取 {n_colors} 个主题色、强调色与候选色...')
             dominant_colors, accent_colors, minor_colors = extract_dominant_colors(img_path, n_colors)
             self._log(f'✅ 主题色 {len(dominant_colors)} 个, 强调色 {len(accent_colors)} 个, 候选色 {len(minor_colors)} 个')
+            self.master.update()
 
             for i, dc in enumerate(dominant_colors):
                 self._log(f'   主题 {i+1}: RGB{dc} {rgb_to_hex(*dc)}')
@@ -1281,27 +1507,29 @@ class RizlineColorSelectorApp:
             self._log(f'🎨 生成配色方案（已应用易读性约束）...')
             full_pool = _build_full_pool(dominant_colors, accent_colors, minor_colors)
             all_schemes = []
-            all_line_groups = []
 
             for dc in dominant_colors:
                 if mode == 'multiple':
-                    schemes = generate_multiple_schemes(dc, full_pool, n_line)
+                    schemes = generate_multiple_schemes(dc, full_pool, n_line_rows, n_line_cols)
                 else:
-                    reg, riz = generate_color_scheme(dc, full_pool=full_pool, num_line_colors=n_line)
+                    reg, riz = generate_color_scheme(dc, full_pool=full_pool,
+                                                      num_line_rows=n_line_rows, num_line_cols=n_line_cols)
                     schemes = [{'name': '标准方案', 'regular': reg, 'riztime': riz}]
 
                 all_schemes.append(schemes)
+            self.master.update()
 
-            # 从色池构建线颜色分组（所有主题共用）
-            threshold = self.similarity_threshold.get()
-            line_groups = build_line_color_groups_from_pool(full_pool, n_line, threshold)
-            for _ in dominant_colors:
-                all_line_groups.append(line_groups)
+            # 从全色池构建全局线颜色行（按色系分行，横向渐变）
+            self._log(f'📐 从色池中按色系分组线颜色...')
+            global_line_rows = build_line_color_rows_from_pool(full_pool, n_rows=n_line_rows, n_cols=n_line_cols)
+            self._log(f'✅ 线颜色 {len(global_line_rows)} 行 × {len(global_line_rows[0]) if global_line_rows else 0} 列')
 
             # 3. 创建结果图
             self._log(f'📊 生成结果图表...')
             fig = create_result_figure(img_path, dominant_colors, all_schemes,
-                                        all_line_groups, n_line, dpi=150)
+                                        [], n_line_cols, dpi=150,
+                                        global_line_rows=global_line_rows)
+            self.master.update()
 
             # 4. 保存（高DPI 300）
             output_dir = self.output_path.get()
@@ -1310,6 +1538,7 @@ class RizlineColorSelectorApp:
             save_path = os.path.join(output_dir, f'rizline_scheme_{timestamp}.png')
             fig.savefig(save_path, dpi=300, bbox_inches='tight',
                         facecolor=fig.get_facecolor())
+            self.master.update()
             self._log(f'✅ 结果已保存: {save_path}')
 
             # 5. 关闭 matplotlib figure 释放内存
